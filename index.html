@@ -1,0 +1,1078 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yeti Fling: Elf Launch</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #87CEEB; /* Sky blue fallback */
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            touch-action: none; /* Prevent scrolling on mobile while playing */
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            color: #004d40;
+            text-shadow: 2px 2px 0px white;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+
+        #score {
+            font-size: 40px;
+            font-weight: bold;
+            color: #d32f2f;
+        }
+
+        #high-score {
+            font-size: 18px;
+            color: #00695c;
+        }
+
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            font-size: 20px;
+            color: #fff;
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.5);
+            pointer-events: none;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.8; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.05); }
+            100% { opacity: 0.8; transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <h1>Yeti Fling 🎄</h1>
+        <div id="score">0 m</div>
+        <div id="high-score">Best: 0 m</div>
+    </div>
+    
+    <div id="instructions">Drag the slingshot to launch the Elf!</div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // --- Game Configuration ---
+    let width, height;
+    const GRAVITY = 0.25;
+    const AIR_RESISTANCE = 0.995;
+    const BOUNCE_FACTOR = 0.6;
+    let groundFriction = 0.95; // Variable now
+    const NORMAL_FRICTION = 0.95;
+    const ICE_FRICTION = 1.0; // Perfectly frictionless
+    
+    const SLINGSHOT_POS = { x: 250, y: 0 }; 
+    const MAX_PULL_DISTANCE = 200; 
+    const FORCE_MULTIPLIER = 0.40;
+    
+    // --- State ---
+    let cameraX = 0;
+    let highScore = 0;
+    let particles = [];
+    let obstacles = []; // Array to hold interactive objects
+    let isDragging = false;
+    let dragPos = { x: 0, y: 0 };
+    
+    const GameState = {
+        IDLE: 0,
+        DRAGGING: 1,
+        FLYING: 2,
+        LANDED: 3,
+        CRASHED: 4
+    };
+    
+    let currentState = GameState.IDLE;
+
+    // --- Object Types ---
+    const ObjType = {
+        SNOWMAN: 0,
+        SNOWPILE: 1,
+        ICE: 2,
+        TRAMPOLINE: 3
+    };
+
+    function generateObstacles() {
+        obstacles = [];
+        // Generate obstacles up to 20000 pixels
+        let currentX = 800;
+        
+        while(currentX < 20000) {
+            // Random spacing 400 - 1000
+            currentX += 400 + Math.random() * 600;
+            
+            const rand = Math.random();
+            let type;
+            let widthObj = 0;
+
+            // Adjusted Probabilities: Less obstacles, more trampolines
+            if (rand < 0.20) { 
+                type = ObjType.SNOWMAN;
+                widthObj = 40;
+            } else if (rand < 0.35) { 
+                type = ObjType.SNOWPILE;
+                widthObj = 60;
+            } else if (rand < 0.65) { 
+                type = ObjType.ICE;
+                widthObj = 400 + Math.random() * 600; 
+            } else {
+                type = ObjType.TRAMPOLINE; 
+                widthObj = 120; 
+            }
+
+            obstacles.push({
+                x: currentX,
+                type: type,
+                width: widthObj,
+                hit: false // For one-time interactions like crashing
+            });
+        }
+    }
+
+    // --- Entities ---
+
+    const elf = {
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        radius: 15,
+        rotation: 0,
+        grounded: false,
+        
+        reset: function() {
+            this.x = SLINGSHOT_POS.x;
+            this.y = SLINGSHOT_POS.y - 40;
+            this.vx = 0;
+            this.vy = 0;
+            this.rotation = 0;
+            this.grounded = false;
+            generateObstacles();
+        },
+
+        update: function() {
+            if (currentState !== GameState.FLYING && currentState !== GameState.LANDED) return;
+
+            // Apply physics
+            this.vy += GRAVITY;
+            this.vx *= AIR_RESISTANCE;
+            this.vy *= AIR_RESISTANCE;
+
+            this.x += this.vx;
+            this.y += this.vy;
+
+            // Reset friction to normal every frame (overridden by ice below)
+            groundFriction = NORMAL_FRICTION;
+
+            const groundLevel = height - 50;
+
+            // --- Obstacle Collision ---
+            // Only check nearby obstacles
+            const nearby = obstacles.filter(o => Math.abs(o.x - this.x) < o.width + 100);
+
+            for (let obs of nearby) {
+                // Snowman / Snowpile Collision
+                if ((obs.type === ObjType.SNOWMAN || obs.type === ObjType.SNOWPILE) && !obs.hit) {
+                    // Hitbox check
+                    if (this.x > obs.x - 20 && this.x < obs.x + obs.width && this.y > groundLevel - 40) {
+                        currentState = GameState.CRASHED;
+                        obs.hit = true; // Mark as hit
+                        this.vx = 0;
+                        this.vy = 0;
+                        this.y = groundLevel; // Buried
+                        createParticles(this.x, this.y, 20, 'snow');
+                        
+                        // Check score even on crash
+                        checkHighScore();
+
+                        document.getElementById('instructions').innerText = "Ouch! Crashed! Click to retry.";
+                        document.getElementById('instructions').style.display = 'block';
+                        return; // Stop update
+                    }
+                }
+
+                // Ice Pond Interaction
+                if (obs.type === ObjType.ICE) {
+                    // Check if strictly touching the ice (y + radius is near ground level)
+                    // We use a looser tolerance (10px) to catch him just before/during contact
+                    if (this.x > obs.x && this.x < obs.x + obs.width && this.y + this.radius >= groundLevel - 10) {
+                        groundFriction = ICE_FRICTION;
+                        if (Math.random() > 0.8 && Math.abs(this.vx) > 0.5) createParticles(this.x, this.y + 15, 1, 'spark'); 
+                    }
+                }
+
+                // Trampoline Interaction
+                if (obs.type === ObjType.TRAMPOLINE) {
+                    if (this.x > obs.x && this.x < obs.x + obs.width) {
+                        // Check if hitting from above
+                        if (this.y + 15 >= groundLevel - 15 && this.vy > 0) {
+                            // Bounce!
+                            this.vy = -Math.abs(this.vy) * 1.5; // Super bounce
+                            // Minimum bounce to ensure it feels like a boost
+                            if (this.vy > -10) this.vy = -15; 
+                            
+                            this.y = groundLevel - 20; // Lift slightly to avoid sticking
+                            this.grounded = false;
+
+                            // Add a forward Boost to counteract air resistance loss
+                            this.vx *= 1.1; 
+
+                            createParticles(this.x, this.y, 10, 'spark');
+                        }
+                    }
+                }
+            }
+
+
+            // Rotation follows velocity
+            if (!this.grounded && (Math.abs(this.vx) > 0.1 || Math.abs(this.vy) > 0.1)) {
+                this.rotation = Math.atan2(this.vy, this.vx);
+            } else if (this.grounded) {
+                // Roll slightly when grounded
+                this.rotation += this.vx * 0.1;
+            }
+
+            // Ground Collision
+            if (this.y + this.radius > groundLevel) {
+                this.y = groundLevel - this.radius;
+                
+                // If on Ice, don't bounce much, just slide
+                if (groundFriction === ICE_FRICTION) {
+                    this.vy = 0; // Stick to ground to prevent micro-bounces that engage air friction
+                    
+                    // Manually Undo Air Resistance
+                    // Current Vx has already been multiplied by AIR_RESISTANCE at start of frame
+                    // We divide it out to restore it.
+                    this.vx /= AIR_RESISTANCE;
+                } else {
+                    this.vy = -this.vy * BOUNCE_FACTOR;
+                }
+                
+                this.vx *= groundFriction; 
+
+                // Add snow splash particles (only if not on ice)
+                if (groundFriction !== ICE_FRICTION && Math.abs(this.vy) > 2) {
+                    createParticles(this.x, this.y + this.radius, 5, 'snow');
+                }
+
+                if (Math.abs(this.vy) < 0.5 && Math.abs(this.vx) < 0.1) {
+                    this.grounded = true;
+                    this.vx = 0;
+                    this.vy = 0;
+                    
+                    if (currentState === GameState.FLYING) {
+                        currentState = GameState.LANDED;
+                        checkHighScore();
+                        document.getElementById('instructions').innerText = "Click to try again!";
+                        document.getElementById('instructions').style.display = 'block';
+                    }
+                } else {
+                    this.grounded = false;
+                }
+            }
+
+            // Trail
+            if (currentState === GameState.FLYING && Math.random() > 0.5) {
+                createParticles(this.x, this.y, 1, 'trail');
+            }
+        },
+
+        draw: function() {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            
+            if (currentState === GameState.CRASHED) {
+                // Draw Legs sticking out of snow
+                // Translate down to "buried" position
+                ctx.translate(0, 10);
+                
+                // Left Leg
+                ctx.save();
+                ctx.rotate(0.3);
+                ctx.fillStyle = "#2E7D32"; // Green tights
+                ctx.beginPath();
+                ctx.rect(-5, -20, 8, 20);
+                ctx.fill();
+                // Boot
+                ctx.fillStyle = "#8D6E63"; 
+                ctx.beginPath();
+                ctx.ellipse(-1, -22, 6, 4, 0, 0, Math.PI*2);
+                ctx.fill();
+                ctx.restore();
+
+                // Right Leg
+                ctx.save();
+                ctx.rotate(-0.3);
+                ctx.fillStyle = "#2E7D32"; 
+                ctx.beginPath();
+                ctx.rect(-3, -25, 8, 20);
+                ctx.fill();
+                // Boot
+                ctx.fillStyle = "#8D6E63"; 
+                ctx.beginPath();
+                ctx.ellipse(1, -27, 6, 4, 0, 0, Math.PI*2);
+                ctx.fill();
+                ctx.restore();
+
+                // Snow mound around waist
+                ctx.fillStyle = "white";
+                ctx.beginPath();
+                ctx.arc(0, 0, 15, Math.PI, 0);
+                ctx.fill();
+
+            } else {
+                // Normal Drawing
+                ctx.rotate(this.rotation);
+                
+                // 1. Legs (Trailing behind)
+                ctx.fillStyle = "#2E7D32"; // Green tights
+                ctx.beginPath();
+                ctx.ellipse(-15, 5, 12, 4, -0.2, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Boots
+                ctx.fillStyle = "#8D6E63"; 
+                ctx.beginPath();
+                ctx.ellipse(-25, 5, 5, 3, -0.2, 0, Math.PI * 2);
+                ctx.fill();
+
+                // 2. Body
+                ctx.fillStyle = "#D32F2F"; // Red tunic
+                ctx.beginPath();
+                ctx.ellipse(0, 0, 15, 8, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Belt
+                ctx.strokeStyle = "#FFD700";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(0, -8);
+                ctx.lineTo(0, 8);
+                ctx.stroke();
+
+                // 3. Head
+                ctx.fillStyle = "#FFCCBC"; // Skin tone
+                ctx.beginPath();
+                ctx.arc(10, -2, 9, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Face details
+                ctx.fillStyle = "black"; // Eye
+                ctx.beginPath();
+                ctx.arc(14, -4, 1.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = "#FF8A80"; // Cheek
+                ctx.beginPath();
+                ctx.arc(12, 0, 2, 0, Math.PI * 2);
+                ctx.fill();
+
+                // 4. Hat
+                ctx.fillStyle = "#2E7D32"; // Green Hat
+                ctx.beginPath();
+                ctx.moveTo(8, -8); // Brim top
+                ctx.lineTo(16, -8); // Brim bottom
+                ctx.lineTo(-5, -18); // Point tip
+                ctx.lineTo(8, -8); 
+                ctx.fill();
+                
+                // Pom pom on hat
+                ctx.fillStyle = "white";
+                ctx.beginPath();
+                ctx.arc(-5, -18, 3, 0, Math.PI * 2);
+                ctx.fill();
+
+                // 5. Arm (Flying superman style)
+                ctx.fillStyle = "#D32F2F"; // Sleeve
+                ctx.beginPath();
+                ctx.ellipse(5, 5, 8, 3, 0.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = "#FFCCBC"; // Hand
+                ctx.beginPath();
+                ctx.arc(12, 8, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        }
+    };
+
+    // --- Initialization & Resize ---
+
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+        SLINGSHOT_POS.y = height - 120;
+        
+        // If resize happens during idle, reset elf position
+        if (currentState === GameState.IDLE) {
+            elf.reset();
+        }
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+    elf.reset();
+
+    // --- Input Handling ---
+
+    function getPointerPos(e) {
+        if (e.touches) {
+            return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        }
+        return { x: e.clientX, y: e.clientY };
+    }
+
+    function onPointerDown(e) {
+        if (currentState === GameState.FLYING) return;
+        
+        if (currentState === GameState.LANDED || currentState === GameState.CRASHED) {
+            // Reset game
+            currentState = GameState.IDLE;
+            elf.reset();
+            cameraX = 0;
+            document.getElementById('instructions').innerText = "Drag the slingshot to launch the Elf!";
+            return;
+        }
+
+        const pos = getPointerPos(e);
+        
+        // Check if clicking near slingshot
+        const dx = pos.x - (SLINGSHOT_POS.x - cameraX);
+        const dy = pos.y - SLINGSHOT_POS.y;
+        
+        if (Math.sqrt(dx*dx + dy*dy) < 100) {
+            isDragging = true;
+            currentState = GameState.DRAGGING;
+            dragPos = { x: pos.x, y: pos.y };
+            document.getElementById('instructions').style.display = 'none';
+        }
+    }
+
+    function onPointerMove(e) {
+        if (!isDragging) return;
+        
+        const pos = getPointerPos(e);
+        
+        // Constrain drag to max radius relative to screen position of slingshot
+        const slingScreenX = SLINGSHOT_POS.x - cameraX;
+        const slingScreenY = SLINGSHOT_POS.y;
+        
+        let dx = pos.x - slingScreenX;
+        let dy = pos.y - slingScreenY;
+        const distance = Math.sqrt(dx*dx + dy*dy);
+        
+        if (distance > MAX_PULL_DISTANCE) {
+            const angle = Math.atan2(dy, dx);
+            dx = Math.cos(angle) * MAX_PULL_DISTANCE;
+            dy = Math.sin(angle) * MAX_PULL_DISTANCE;
+        }
+        
+        dragPos = { x: slingScreenX + dx, y: slingScreenY + dy };
+        
+        // Update elf position visually while dragging
+        elf.x = dragPos.x + cameraX;
+        elf.y = dragPos.y;
+
+        // Visual aiming: Rotate elf to face the opposite direction of the pull (launch direction)
+        const launchDx = slingScreenX - dragPos.x;
+        const launchDy = slingScreenY - dragPos.y;
+        elf.rotation = Math.atan2(launchDy, launchDx);
+    }
+
+    function onPointerUp(e) {
+        if (!isDragging) return;
+        
+        isDragging = false;
+        currentState = GameState.FLYING;
+        
+        const slingScreenX = SLINGSHOT_POS.x - cameraX;
+        const slingScreenY = SLINGSHOT_POS.y;
+        
+        // Calculate vector from elf to slingshot center (inverse of drag)
+        const dx = slingScreenX - dragPos.x;
+        const dy = slingScreenY - dragPos.y;
+        
+        elf.vx = dx * FORCE_MULTIPLIER;
+        elf.vy = dy * FORCE_MULTIPLIER;
+        
+        // Set initial rotation to match velocity exactly immediately
+        elf.rotation = Math.atan2(elf.vy, elf.vx);
+
+        // Launch sound effect visualization (particle burst)
+        createParticles(elf.x, elf.y, 10, 'spark');
+    }
+
+    canvas.addEventListener('mousedown', onPointerDown);
+    canvas.addEventListener('mousemove', onPointerMove);
+    canvas.addEventListener('mouseup', onPointerUp);
+    
+    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); onPointerDown(e); }, {passive: false});
+    canvas.addEventListener('touchmove', (e) => { e.preventDefault(); onPointerMove(e); }, {passive: false});
+    canvas.addEventListener('touchend', (e) => { e.preventDefault(); onPointerUp(e); }, {passive: false});
+
+    // --- Particle System ---
+
+    function createParticles(x, y, count, type) {
+        for (let i = 0; i < count; i++) {
+            particles.push({
+                x: x,
+                y: y,
+                vx: (Math.random() - 0.5) * (type === 'spark' ? 10 : 2),
+                vy: (Math.random() - 0.5) * (type === 'spark' ? 10 : 2),
+                life: 1.0,
+                type: type,
+                color: type === 'snow' ? '#FFF' : (type === 'trail' ? `rgba(255,255,255,0.5)` : '#FFD700')
+            });
+        }
+    }
+
+    function updateParticles() {
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life -= 0.02;
+            
+            if (p.type === 'snow') p.vy += 0.1; // gravity for snow clumps
+
+            if (p.life <= 0) {
+                particles.splice(i, 1);
+            }
+        }
+    }
+
+    function drawParticles() {
+        particles.forEach(p => {
+            ctx.globalAlpha = p.life;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.type === 'trail' ? 2 : 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+        });
+    }
+
+    // --- Environment Drawing ---
+
+    function drawBackground() {
+        // Sky Gradient
+        const gradient = ctx.createLinearGradient(0, 0, 0, height);
+        gradient.addColorStop(0, "#0B486B");
+        gradient.addColorStop(1, "#87CEEB");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, width, height);
+
+        // Sun/Moon
+        ctx.fillStyle = "rgba(255, 255, 200, 0.8)";
+        ctx.beginPath();
+        ctx.arc(width - 100, 100, 40, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Parallax Stars/Snow
+        ctx.fillStyle = "white";
+        for(let i=0; i<50; i++) {
+            let sx = (i * 100 - cameraX * 0.1) % (width * 2);
+            if(sx < 0) sx += width * 2;
+            let sy = (i * 37) % (height/2);
+            ctx.beginPath();
+            ctx.arc(sx, sy, Math.random() * 2, 0, Math.PI*2);
+            ctx.fill();
+        }
+
+        // Parallax Mountains (Far)
+        ctx.fillStyle = "#CDD7E0";
+        ctx.beginPath();
+        ctx.moveTo(0, height);
+        for(let i = -1; i < width/100 + 2; i++) {
+            // Modulo logic for infinite scrolling based on cameraX
+            const mw = 300;
+            const offset = (cameraX * 0.2) % mw;
+            const x = (i * mw) - offset;
+            const h = 200 + Math.sin(i * 132) * 50;
+            ctx.lineTo(x, height - h);
+            ctx.lineTo(x + mw/2, height - h - 100);
+            ctx.lineTo(x + mw, height - h);
+        }
+        ctx.lineTo(width, height);
+        ctx.fill();
+
+        // Parallax Trees (Mid)
+        const treeSpacing = 150;
+        const treeOffset = (cameraX * 0.5) % treeSpacing;
+        for (let i = -1; i < width/treeSpacing + 2; i++) {
+            const x = (i * treeSpacing) - treeOffset;
+            const y = height - 50;
+            drawTree(x, y, 0.8);
+        }
+
+        // Ground
+        ctx.fillStyle = "#FFFFFF";
+        ctx.fillRect(0, height - 50, width, 50);
+        ctx.fillStyle = "#E0F7FA"; // Ice/Snow texture
+        ctx.fillRect(0, height - 15, width, 15);
+    }
+
+    function drawTree(x, y, scale) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(scale, scale);
+        
+        // Trunk
+        ctx.fillStyle = "#5D4037";
+        ctx.fillRect(-5, -20, 10, 20);
+        
+        // Leaves
+        ctx.fillStyle = "#2E7D32";
+        ctx.beginPath();
+        ctx.moveTo(-20, -20);
+        ctx.lineTo(0, -60);
+        ctx.lineTo(20, -20);
+        ctx.fill();
+        
+        ctx.beginPath();
+        ctx.moveTo(-18, -40);
+        ctx.lineTo(0, -75);
+        ctx.lineTo(18, -40);
+        ctx.fill();
+
+        // Snow on tree
+        ctx.fillStyle = "white";
+        ctx.beginPath();
+        ctx.moveTo(-5, -60);
+        ctx.lineTo(0, -65);
+        ctx.lineTo(5, -60);
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    function drawObstacles() {
+        const groundY = height - 50;
+        const visibleMin = cameraX - 100;
+        const visibleMax = cameraX + width + 100;
+
+        for (let obs of obstacles) {
+            // Only draw if visible
+            if (obs.x + obs.width < visibleMin || obs.x > visibleMax) continue;
+
+            if (obs.type === ObjType.ICE) {
+                // Ice Pond
+                ctx.fillStyle = "rgba(180, 230, 255, 0.6)";
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.rect(obs.x, groundY, obs.width, 10);
+                ctx.fill();
+                ctx.stroke();
+                
+                // Reflection lines scattered across width
+                ctx.strokeStyle = "white";
+                ctx.beginPath();
+                for(let i = 10; i < obs.width - 20; i += 50) {
+                    if (Math.random() > 0.5) {
+                        ctx.moveTo(obs.x + i, groundY + 5);
+                        ctx.lineTo(obs.x + i + 20, groundY + 5);
+                    }
+                }
+                ctx.stroke();
+
+            } else if (obs.type === ObjType.TRAMPOLINE) {
+                // Trampoline
+                ctx.fillStyle = "#333";
+                ctx.fillRect(obs.x, groundY - 10, obs.width, 5); // Mat
+                
+                ctx.strokeStyle = "#999"; // Legs
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(obs.x + 5, groundY - 10);
+                ctx.lineTo(obs.x + 5, groundY);
+                ctx.moveTo(obs.x + obs.width - 5, groundY - 10);
+                ctx.lineTo(obs.x + obs.width - 5, groundY);
+                ctx.stroke();
+
+            } else if (obs.type === ObjType.SNOWMAN) {
+                // Snowman
+                ctx.save();
+                ctx.translate(obs.x + 20, groundY);
+                
+                // Base
+                ctx.fillStyle = "white";
+                ctx.beginPath();
+                ctx.arc(0, -15, 15, 0, Math.PI * 2);
+                ctx.fill();
+                // Middle
+                ctx.beginPath();
+                ctx.arc(0, -38, 12, 0, Math.PI * 2);
+                ctx.fill();
+                // Head
+                ctx.beginPath();
+                ctx.arc(0, -56, 9, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Nose
+                ctx.fillStyle = "orange";
+                ctx.beginPath();
+                ctx.moveTo(0, -56);
+                ctx.lineTo(10, -53);
+                ctx.lineTo(0, -50);
+                ctx.fill();
+
+                // Eyes
+                ctx.fillStyle = "black";
+                ctx.beginPath();
+                ctx.arc(-3, -58, 1.5, 0, Math.PI*2);
+                ctx.arc(3, -58, 1.5, 0, Math.PI*2);
+                ctx.fill();
+
+                // Arms
+                ctx.strokeStyle = "#5D4037";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(-10, -38);
+                ctx.lineTo(-20, -45);
+                ctx.moveTo(10, -38);
+                ctx.lineTo(20, -45);
+                ctx.stroke();
+
+                ctx.restore();
+            } else if (obs.type === ObjType.SNOWPILE) {
+                // Snow Pile
+                ctx.fillStyle = "white";
+                ctx.beginPath();
+                ctx.moveTo(obs.x, groundY);
+                ctx.quadraticCurveTo(obs.x + obs.width/2, groundY - 40, obs.x + obs.width, groundY);
+                ctx.fill();
+                // Texture
+                ctx.fillStyle = "#E3F2FD";
+                ctx.beginPath();
+                ctx.arc(obs.x + 20, groundY - 10, 5, 0, Math.PI*2);
+                ctx.fill();
+            }
+        }
+    }
+
+    function drawYeti() {
+        const x = SLINGSHOT_POS.x;
+        const y = SLINGSHOT_POS.y;
+
+        ctx.save();
+        ctx.translate(x - 60, y + 35);
+        
+        // Draw Yeti (More realistic style)
+        
+        // Fur color
+        ctx.fillStyle = "#F5F5F5";
+        ctx.strokeStyle = "#E0E0E0"; // Shadow/Outline
+        
+        // 1. Back Leg (Crouched)
+        ctx.beginPath();
+        ctx.ellipse(10, 10, 25, 35, -0.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // 2. Main Body (Hunchbacked and furry)
+        ctx.beginPath();
+        ctx.moveTo(0, 20);
+        // Hunchback curve
+        ctx.bezierCurveTo(-30, -40, 20, -80, 50, -50); 
+        // Chest
+        ctx.bezierCurveTo(60, -30, 60, 0, 40, 20);
+        // Bottom
+        ctx.lineTo(0, 20);
+        ctx.fill();
+        
+        // Fur texture on back
+        ctx.beginPath();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#DDD";
+        ctx.moveTo(-10, -20);
+        ctx.lineTo(-15, -15);
+        ctx.moveTo(-5, -30);
+        ctx.lineTo(-12, -25);
+        ctx.stroke();
+
+        // 3. Head (Integrated with shoulders)
+        ctx.beginPath();
+        ctx.arc(35, -55, 20, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Face Area (Darker skin)
+        ctx.fillStyle = "#90A4AE";
+        ctx.beginPath();
+        ctx.ellipse(42, -55, 12, 14, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Face Details
+        ctx.fillStyle = "#1A237E"; // Deep blue/black eyes
+        ctx.beginPath();
+        ctx.arc(46, -58, 2, 0, Math.PI * 2); // Right Eye
+        ctx.arc(38, -58, 2, 0, Math.PI * 2); // Left Eye
+        ctx.fill();
+        
+        // Mouth (Gritted teeth or determined look)
+        ctx.strokeStyle = "#37474F";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(38, -50);
+        ctx.lineTo(46, -50);
+        ctx.stroke();
+
+        // Brow/Forehead fur
+        ctx.fillStyle = "#F5F5F5";
+        ctx.beginPath();
+        ctx.arc(35, -62, 15, 3.5, 5.9);
+        ctx.fill();
+
+        // 4. Arms (Muscular, holding slingshot)
+        ctx.fillStyle = "#F5F5F5";
+        ctx.strokeStyle = "#E0E0E0";
+        
+        // Left Arm (Background arm)
+        ctx.beginPath();
+        ctx.ellipse(45, -25, 10, 25, -0.5, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Right Arm (Foreground arm, reaching to slingshot base)
+        ctx.beginPath();
+        ctx.ellipse(30, -30, 12, 28, 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Hand grabbing slingshot
+        ctx.fillStyle = "#90A4AE";
+        ctx.beginPath();
+        ctx.arc(45, -20, 8, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    function drawSlingshot(fore) {
+        const x = SLINGSHOT_POS.x;
+        const y = SLINGSHOT_POS.y;
+
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = "#3E2723";
+
+        if (!fore) {
+            // Back post
+            ctx.beginPath();
+            ctx.moveTo(x + 10, y + 50); // Base
+            ctx.lineTo(x + 10, y - 40); // Top
+            ctx.stroke();
+
+            // Elastic (Back part)
+            ctx.strokeStyle = "#3e1c10";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x + 10, y - 40);
+            if (currentState === GameState.IDLE) {
+                ctx.lineTo(x, y - 40);
+            } else if (currentState === GameState.DRAGGING) {
+                // Draw to elfs back
+                 // Convert screen drag coords to local draw coords if needed, 
+                 // but here we just draw to elf pos since we translated context
+                 ctx.lineTo(elf.x, elf.y);
+            } else {
+                 // Snapped back
+                 ctx.lineTo(x, y-40);
+            }
+            ctx.stroke();
+        } else {
+            // Elf is drawn between layers
+
+            // Elastic (Front part)
+            ctx.strokeStyle = "#5d2a1a";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            if (currentState === GameState.DRAGGING) {
+                ctx.moveTo(elf.x, elf.y);
+                ctx.lineTo(x - 10, y - 40);
+            } else {
+                ctx.moveTo(x, y-40);
+                ctx.lineTo(x - 10, y - 40);
+            }
+            ctx.stroke();
+
+            // Front post
+            ctx.strokeStyle = "#5D4037";
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(x - 10, y + 60); // Base
+            ctx.lineTo(x - 10, y - 40); // Top
+            ctx.stroke();
+        }
+    }
+
+    function drawDistanceMarkers() {
+        ctx.fillStyle = "#004d40";
+        ctx.font = "14px Arial";
+        ctx.textAlign = "center";
+        
+        // Draw a marker every 50 meters (500 pixels)
+        const startMarker = Math.floor(cameraX / 500);
+        const endMarker = startMarker + Math.ceil(width / 500) + 1;
+
+        for (let i = startMarker; i < endMarker; i++) {
+            if (i === 0) continue;
+            const dist = i * 50; // meters
+            const x = (i * 500);
+            
+            // Candy cane pole
+            ctx.fillStyle = "#d32f2f";
+            ctx.fillRect(x - 2, height - 90, 4, 40);
+            ctx.fillStyle = "white";
+            for(let j=0; j<4; j++) {
+                ctx.fillRect(x - 2, height - 90 + (j*10), 4, 5);
+            }
+
+            // Text
+            ctx.fillStyle = "#004d40";
+            ctx.fillText(dist + "m", x, height - 100);
+        }
+    }
+
+    function drawHighScoreMarker() {
+        if (highScore <= 0) return;
+
+        const x = SLINGSHOT_POS.x + (highScore * 10);
+        const groundY = height - 50;
+        
+        // Only draw if roughly visible
+        if (x < cameraX - 100 || x > cameraX + width + 100) return;
+
+        ctx.save();
+        ctx.translate(x, groundY);
+
+        // Wooden Pole
+        ctx.fillStyle = "#8B4513"; // Saddle Brown
+        ctx.fillRect(-5, -100, 10, 100);
+        ctx.strokeStyle = "#5D4037";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(-5, -100, 10, 100);
+
+        // Wooden Sign Plank
+        ctx.translate(0, -100);
+        ctx.fillStyle = "#DEB887"; // Burlywood
+        ctx.fillRect(-60, -40, 120, 40);
+        ctx.strokeRect(-60, -40, 120, 40);
+        
+        // Wood grain detail
+        ctx.strokeStyle = "#CD853F"; // Peru
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-50, -30); ctx.lineTo(50, -30);
+        ctx.moveTo(-55, -10); ctx.lineTo(55, -10);
+        ctx.stroke();
+
+        // Text
+        ctx.fillStyle = "#5D4037"; // Dark brown text
+        ctx.font = "bold 16px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.shadowColor = "rgba(255,255,255,0.5)";
+        ctx.shadowBlur = 2;
+        ctx.fillText("BEST DISTANCE", 0, -25);
+        ctx.font = "bold 20px Arial";
+        ctx.fillText(highScore + "m", 0, -5);
+        ctx.shadowBlur = 0; // Reset
+
+        ctx.restore();
+    }
+
+    // --- Logic Helpers ---
+
+    function checkHighScore() {
+        const distance = Math.floor((elf.x - SLINGSHOT_POS.x) / 10);
+        if (distance > highScore) {
+            highScore = distance;
+            document.getElementById('high-score').innerText = `Best: ${highScore} m`;
+            // Celebration particles
+            createParticles(width/2 + cameraX, height/2, 50, 'spark');
+        }
+    }
+
+    // --- Main Loop ---
+
+    function loop() {
+        // Update Logic
+        elf.update();
+        updateParticles();
+
+        // Camera Logic
+        let targetCamX = elf.x - width * 0.3; // Keep elf at 30% screen width
+        if (targetCamX < 0) targetCamX = 0;
+        
+        // Smooth camera
+        cameraX += (targetCamX - cameraX) * 0.1;
+
+        // Draw
+        ctx.clearRect(0, 0, width, height);
+
+        // Draw Background (Static relative to screen, handles its own parallax internally)
+        drawBackground();
+
+        ctx.save();
+        // Apply camera translation
+        ctx.translate(-cameraX, 0);
+
+        drawDistanceMarkers();
+        drawHighScoreMarker(); // Draw the high score flag
+
+        // Draw Obstacles
+        drawObstacles();
+
+        // Draw Scene
+        drawYeti();
+        drawSlingshot(false); // Back layer
+        
+        if (currentState !== GameState.IDLE || currentState === GameState.IDLE) {
+             // Always draw elf unless logic changes
+             elf.draw();
+        }
+        
+        drawSlingshot(true); // Front layer
+        
+        drawParticles();
+
+        ctx.restore();
+
+        // Update UI
+        if (currentState === GameState.FLYING || currentState === GameState.LANDED || currentState === GameState.CRASHED) {
+            const dist = Math.max(0, Math.floor((elf.x - SLINGSHOT_POS.x) / 10));
+            document.getElementById('score').innerText = dist + " m";
+        }
+
+        requestAnimationFrame(loop);
+    }
+
+    // Start
+    loop();
+
+</script>
+</body>
+</html>
